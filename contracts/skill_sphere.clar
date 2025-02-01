@@ -8,6 +8,11 @@
 (define-constant err-unauthorized (err u102))
 (define-constant err-already-exists (err u103))
 (define-constant err-expired (err u104))
+(define-constant err-staking-required (err u105))
+(define-constant err-insufficient-stake (err u106))
+
+;; Staking configuration
+(define-constant min-issuer-stake u1000000) ;; In microSTX
 
 ;; Data vars
 (define-map certifications
@@ -19,11 +24,18 @@
         description: (string-ascii 256),
         issue-date: uint,
         expiry-date: uint,
-        revoked: bool
+        revoked: bool,
+        transferable: bool
     }
 )
 
-(define-map authorized-issuers principal bool)
+(define-map authorized-issuers 
+    principal 
+    {
+        active: bool,
+        staked-amount: uint
+    }
+)
 
 (define-map endorsements
     { cert-id: uint, endorser: principal }
@@ -33,26 +45,59 @@
     }
 )
 
-;; Data vars
 (define-data-var certification-nonce uint u0)
 
 ;; Private functions
 (define-private (is-authorized-issuer (issuer principal))
-    (default-to false (get-authorized-issuer issuer))
+    (match (get-authorized-issuer-info issuer)
+        issuer-info (and 
+            (get active issuer-info)
+            (>= (get staked-amount issuer-info) min-issuer-stake)
+        )
+        false
+    )
 )
 
 ;; Public functions
-(define-public (add-authorized-issuer (issuer principal))
-    (begin
-        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-        (ok (map-set authorized-issuers issuer true))
+(define-public (stake-and-activate-issuer (stake-amount uint))
+    (let (
+        (sender tx-sender)
+        (current-stake (default-to u0 (get staked-amount (map-get? authorized-issuers sender))))
+    )
+        (try! (stx-transfer? stake-amount sender (as-contract tx-sender)))
+        (ok (map-set authorized-issuers 
+            sender
+            {
+                active: true,
+                staked-amount: (+ current-stake stake-amount)
+            }
+        ))
+    )
+)
+
+(define-public (unstake-issuer (amount uint))
+    (let (
+        (sender tx-sender)
+        (issuer-info (unwrap! (get-authorized-issuer-info sender) err-not-found))
+        (current-stake (get staked-amount issuer-info))
+    )
+        (asserts! (>= current-stake amount) err-insufficient-stake)
+        (try! (as-contract (stx-transfer? amount (as-contract tx-sender) sender)))
+        (ok (map-set authorized-issuers
+            sender
+            {
+                active: (>= (- current-stake amount) min-issuer-stake),
+                staked-amount: (- current-stake amount)
+            }
+        ))
     )
 )
 
 (define-public (issue-certification (recipient principal) 
-                                  (title (string-ascii 64))
-                                  (description (string-ascii 256))
-                                  (validity-period uint))
+                                (title (string-ascii 64))
+                                (description (string-ascii 256))
+                                (validity-period uint)
+                                (transferable bool))
     (let (
         (issuer tx-sender)
         (cert-id (var-get certification-nonce))
@@ -70,8 +115,23 @@
                 description: description,
                 issue-date: issue-date,
                 expiry-date: expiry-date,
-                revoked: false
+                revoked: false,
+                transferable: transferable
             }
+        ))
+    )
+)
+
+(define-public (transfer-certification (cert-id uint) (new-recipient principal))
+    (let (
+        (cert (unwrap! (get-certification cert-id) err-not-found))
+    )
+        (asserts! (is-eq tx-sender (get recipient cert)) err-unauthorized)
+        (asserts! (get transferable cert) err-unauthorized)
+        (asserts! (not (get revoked cert)) err-unauthorized)
+        (ok (map-set certifications
+            { cert-id: cert-id }
+            (merge cert { recipient: new-recipient })
         ))
     )
 )
@@ -107,7 +167,7 @@
     (ok (map-get? certifications { cert-id: cert-id }))
 )
 
-(define-read-only (get-authorized-issuer (issuer principal))
+(define-read-only (get-authorized-issuer-info (issuer principal))
     (map-get? authorized-issuers issuer)
 )
 
