@@ -8,52 +8,57 @@ import {
 import { assertEquals } from 'https://deno.land/std@0.90.0/testing/asserts.ts';
 
 Clarinet.test({
-  name: "Ensure that only contract owner can add authorized issuers",
+  name: "Test issuer staking mechanism",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const deployer = accounts.get('deployer')!;
     const issuer = accounts.get('wallet_1')!;
     
+    // Attempt to stake
     let block = chain.mineBlock([
       Tx.contractCall(
         'skill_sphere',
-        'add-authorized-issuer',
-        [types.principal(issuer.address)],
-        deployer.address
+        'stake-and-activate-issuer',
+        [types.uint(1000000)],
+        issuer.address
       ),
     ]);
     block.receipts[0].result.expectOk();
     
-    // Non-owner attempt should fail
+    // Verify issuer status
     block = chain.mineBlock([
       Tx.contractCall(
         'skill_sphere',
-        'add-authorized-issuer',
+        'get-authorized-issuer-info',
         [types.principal(issuer.address)],
         issuer.address
       ),
     ]);
-    block.receipts[0].result.expectErr(types.uint(100)); // err-owner-only
+    
+    const issuerInfo = block.receipts[0].result.expectSome();
+    assertEquals(issuerInfo.active, true);
+    assertEquals(issuerInfo.stakedAmount, types.uint(1000000));
   },
 });
 
 Clarinet.test({
-  name: "Test certification issuance and validation",
+  name: "Test certification transfer functionality",
   async fn(chain: Chain, accounts: Map<string, Account>) {
     const deployer = accounts.get('deployer')!;
     const issuer = accounts.get('wallet_1')!;
     const recipient = accounts.get('wallet_2')!;
+    const newRecipient = accounts.get('wallet_3')!;
     
-    // Add authorized issuer
+    // Setup issuer
     let block = chain.mineBlock([
       Tx.contractCall(
         'skill_sphere',
-        'add-authorized-issuer',
-        [types.principal(issuer.address)],
-        deployer.address
+        'stake-and-activate-issuer',
+        [types.uint(1000000)],
+        issuer.address
       ),
     ]);
     
-    // Issue certification
+    // Issue transferable certification
     block = chain.mineBlock([
       Tx.contractCall(
         'skill_sphere',
@@ -62,67 +67,38 @@ Clarinet.test({
           types.principal(recipient.address),
           types.ascii("Blockchain Developer"),
           types.ascii("Complete blockchain development certification"),
-          types.uint(100)
+          types.uint(100),
+          types.bool(true)
         ],
         issuer.address
       ),
     ]);
     block.receipts[0].result.expectOk();
     
-    // Verify certification
+    // Transfer certification
     block = chain.mineBlock([
       Tx.contractCall(
         'skill_sphere',
-        'is-certification-valid',
-        [types.uint(0)],
+        'transfer-certification',
+        [
+          types.uint(0),
+          types.principal(newRecipient.address)
+        ],
         recipient.address
       ),
     ]);
-    block.receipts[0].result.expectOk().expectBool(true);
-  },
-});
-
-Clarinet.test({
-  name: "Test endorsement functionality",
-  async fn(chain: Chain, accounts: Map<string, Account>) {
-    const deployer = accounts.get('deployer')!;
-    const issuer = accounts.get('wallet_1')!;
-    const recipient = accounts.get('wallet_2')!;
-    const endorser = accounts.get('wallet_3')!;
+    block.receipts[0].result.expectOk();
     
-    // Setup and issue certification
-    let block = chain.mineBlock([
-      Tx.contractCall(
-        'skill_sphere',
-        'add-authorized-issuer',
-        [types.principal(issuer.address)],
-        deployer.address
-      ),
-      Tx.contractCall(
-        'skill_sphere',
-        'issue-certification',
-        [
-          types.principal(recipient.address),
-          types.ascii("Blockchain Developer"),
-          types.ascii("Complete blockchain development certification"),
-          types.uint(100)
-        ],
-        issuer.address
-      ),
-    ]);
-    
-    // Add endorsement
+    // Verify new recipient
     block = chain.mineBlock([
       Tx.contractCall(
         'skill_sphere',
-        'add-endorsement',
-        [
-          types.uint(0),
-          types.ascii("Excellent blockchain developer")
-        ],
-        endorser.address
+        'get-certification',
+        [types.uint(0)],
+        newRecipient.address
       ),
     ]);
-    block.receipts[0].result.expectOk();
+    const cert = block.receipts[0].result.expectOk().expectSome();
+    assertEquals(cert.recipient, newRecipient.address);
   },
 });
